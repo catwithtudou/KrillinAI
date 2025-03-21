@@ -8,4 +8,12 @@ models/
 uploads/
 app.log
 build/
+<<<<<<< HEAD
 dist/
+=======
+dist/
+
+# MACOS
+.DS_Store
+._*
+>>>>>>> 9e742ecbf739ec37676a2fa60213decb9a4265c6

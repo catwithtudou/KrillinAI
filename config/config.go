@@ -1,13 +1,16 @@
 package config
 
 import (
-	"errors"         // 用于创建和返回错误
-	"krillin-ai/log" // 导入项目自定义日志包
-	"net/url"        // 用于解析和处理URL
-	"os"             // 提供操作系统功能，如文件访问和环境变量
-	"strconv"        // 提供字符串转换功能
+	"errors"
+	"fmt"
+	"krillin-ai/log"
+	"net/url"
+	"os"
+	"runtime"
+	"strconv"
 
-	"github.com/BurntSushi/toml" // 用于解析TOML格式的配置文件
+	"github.com/BurntSushi/toml"
+	"go.uber.org/zap"
 )
 
 // App 应用程序核心配置结构体
@@ -28,17 +31,21 @@ type Server struct {
 
 // LocalModel 本地模型配置结构体
 type LocalModel struct {
-	FasterWhisper string `toml:"faster_whisper"` // FasterWhisper模型大小（tiny/medium/large-v2）
+	Whisper string `toml:"whisper"`
 }
 
-// Openai OpenAI服务配置结构体
+type OpenAiWhisper struct {
+	BaseUrl string `toml:"base_url"`
+	ApiKey  string `toml:"api_key"`
+}
+
 type Openai struct {
-	BaseUrl string `toml:"base_url"` // OpenAI API的基础URL，支持自定义或第三方兼容接口
-	Model   string `toml:"model"`    // 使用的模型名称
-	ApiKey  string `toml:"api_key"`  // OpenAI的API密钥
+	BaseUrl string        `toml:"base_url"`
+	Model   string        `toml:"model"`
+	ApiKey  string        `toml:"api_key"`
+	Whisper OpenAiWhisper `toml:"whisper"`
 }
 
-// AliyunOss 阿里云对象存储服务配置
 type AliyunOss struct {
 	AccessKeyId     string `toml:"access_key_id"`     // 阿里云访问ID
 	AccessKeySecret string `toml:"access_key_secret"` // 阿里云访问密钥
@@ -87,7 +94,7 @@ var Conf = Config{
 		Port: 8888,        // 默认端口8888
 	},
 	LocalModel: LocalModel{
-		FasterWhisper: "medium", // 默认使用中等大小的FasterWhisper模型
+		Whisper: "large-v2",
 	},
 }
 
@@ -126,8 +133,8 @@ func loadFromEnv() {
 	}
 
 	// LocalModel 配置
-	if v := os.Getenv("KRILLIN_FASTER_WHISPER"); v != "" {
-		Conf.LocalModel.FasterWhisper = v
+	if v := os.Getenv("KRILLIN_LOCAL_WHISPER"); v != "" {
+		Conf.LocalModel.Whisper = v
 	}
 
 	// OpenAI 配置
@@ -139,6 +146,14 @@ func loadFromEnv() {
 	}
 	if v := os.Getenv("KRILLIN_OPENAI_API_KEY"); v != "" {
 		Conf.Openai.ApiKey = v
+	}
+
+	// Whisper配置
+	if v := os.Getenv("KRILLIN_OPENAI_WHISPER_BASE_URL"); v != "" {
+		Conf.Openai.Whisper.BaseUrl = v
+	}
+	if v := os.Getenv("KRILLIN_OPENAI_WHISPER_API_KEY"); v != "" {
+		Conf.Openai.Whisper.ApiKey = v
 	}
 
 	// Aliyun OSS 配置
@@ -175,14 +190,20 @@ func validateConfig() error {
 	// 检查转写服务提供商配置
 	switch Conf.App.TranscribeProvider {
 	case "openai":
-		// OpenAI转写服务需要API密钥
-		if Conf.Openai.ApiKey == "" {
+		if Conf.Openai.Whisper.ApiKey == "" {
 			return errors.New("使用OpenAI转写服务需要配置 OpenAI API Key")
 		}
 	case "fasterwhisper":
-		// 验证FasterWhisper模型选择是否有效
-		if Conf.LocalModel.FasterWhisper != "tiny" && Conf.LocalModel.FasterWhisper != "medium" && Conf.LocalModel.FasterWhisper != "large-v2" {
+		if Conf.LocalModel.Whisper != "tiny" && Conf.LocalModel.Whisper != "medium" && Conf.LocalModel.Whisper != "large-v2" {
 			return errors.New("检测到开启了fasterwhisper，但模型选型配置不正确，请检查配置")
+		}
+	case "whisperkit":
+		if runtime.GOOS != "darwin" {
+			log.GetLogger().Error("whisperkit只支持macos", zap.String("当前系统", runtime.GOOS))
+			return fmt.Errorf("whisperkit只支持macos")
+		}
+		if Conf.LocalModel.Whisper != "large-v2" {
+			return errors.New("检测到开启了whisperkit，但模型选型配置不正确，请检查配置")
 		}
 	case "aliyun":
 		// 阿里云语音服务需要完整的密钥配置
@@ -235,8 +256,8 @@ func LoadConfig() error {
 		return err
 	}
 
-	// 使用本地FasterWhisper模型时不允许并行处理（资源限制）
-	if Conf.App.TranscribeProvider == "fasterwhisper" {
+	// 本地模型不并发
+	if Conf.App.TranscribeProvider == "fasterwhisper" || Conf.App.TranscribeProvider == "whisperkit" {
 		Conf.App.TranslateParallelNum = 1
 	}
 
