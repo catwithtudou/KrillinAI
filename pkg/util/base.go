@@ -3,7 +3,6 @@ package util
 import (
 	"archive/zip"
 	"fmt"
-	"github.com/google/uuid"
 	"io"
 	"math"
 	"math/rand"
@@ -14,15 +13,45 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/google/uuid"
 )
 
+// strWithUpperLowerNum 定义了一个包含所有可能字符的切片
+// 包含：
+// - 小写字母 (a-z)
+// - 大写字母 (A-Z)
+// - 数字 (0-9)
+// 使用rune类型存储，以支持Unicode字符
 var strWithUpperLowerNum = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ123456789")
 
+// GenerateRandStringWithUpperLowerNum 生成指定长度的随机字符串
+// 参数：
+//   - n: 需要生成的字符串长度
+//
+// 返回值：
+//   - string: 生成的随机字符串
+//
+// 使用示例：
+//   - 生成8位随机字符串：GenerateRandStringWithUpperLowerNum(8)
+//   - 生成16位随机字符串：GenerateRandStringWithUpperLowerNum(16)
+//
+// 实现原理：
+// 1. 创建一个长度为n的rune切片
+// 2. 对每个位置，从strWithUpperLowerNum中随机选择一个字符
+// 3. 将rune切片转换为字符串
 func GenerateRandStringWithUpperLowerNum(n int) string {
+	// 创建一个长度为n的rune切片，用于存储随机字符
 	b := make([]rune, n)
+
+	// 遍历切片的每个位置
 	for i := range b {
+		// 从strWithUpperLowerNum中随机选择一个字符
+		// rand.Intn(len(strWithUpperLowerNum))生成[0, len-1]范围内的随机数
 		b[i] = strWithUpperLowerNum[rand.Intn(len(strWithUpperLowerNum))]
 	}
+
+	// 将rune切片转换为字符串并返回
 	return string(b)
 }
 
@@ -45,9 +74,33 @@ func GetYouTubeID(youtubeURL string) (string, error) {
 	return "", fmt.Errorf("no video ID found")
 }
 
+// GetBilibiliVideoId 从B站视频链接中提取视频ID（BV号）
+// 参数：
+//   - url: B站视频链接，支持多种格式
+//
+// 返回值：
+//   - string: 视频的BV号，如果无法匹配则返回空字符串
+//
+// 支持的链接格式示例：
+// 1. https://www.bilibili.com/video/BV1GJ411x7h7
+// 2. https://bilibili.com/video/BV1GJ411x7h7
+// 3. https://www.bilibili.com/video/av170001/BV1GJ411x7h7
 func GetBilibiliVideoId(url string) string {
+	// 正则表达式解析：
+	// ^https:// - 匹配链接开头
+	// (?:www\.)? - 可选的www.部分
+	// bilibili\.com/ - 匹配bilibili.com域名
+	// (?:video/|video/av\d+/) - 匹配video/或video/av数字/路径
+	// (BV[a-zA-Z0-9]+) - 捕获组：匹配BV开头的视频ID
 	re := regexp.MustCompile(`https://(?:www\.)?bilibili\.com/(?:video/|video/av\d+/)(BV[a-zA-Z0-9]+)`)
+
+	// 查找匹配项
+	// FindStringSubmatch返回一个字符串切片，其中：
+	// matches[0]是完整匹配的字符串
+	// matches[1]是第一个捕获组（BV号）
 	matches := re.FindStringSubmatch(url)
+
+	// 如果找到匹配项（matches长度大于1，说明至少有一个捕获组）
 	if len(matches) > 1 {
 		// 返回匹配到的BV号
 		return matches[1]

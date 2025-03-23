@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/samber/lo"
-	"go.uber.org/zap"
 	"krillin-ai/internal/dto"
 	"krillin-ai/internal/storage"
 	"krillin-ai/internal/types"
@@ -15,27 +13,37 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/samber/lo"
+	"go.uber.org/zap"
 )
 
+// StartSubtitleTask 启动字幕生成任务的核心服务方法
+// 该方法负责初始化任务参数、创建任务目录、启动异步处理流程
 func (s Service) StartSubtitleTask(req dto.StartVideoSubtitleTaskReq) (*dto.StartVideoSubtitleTaskResData, error) {
-	// 校验链接
+	// 1. 视频链接验证
+	// 检查YouTube链接
 	if strings.Contains(req.Url, "youtube.com") {
 		videoId, _ := util.GetYouTubeID(req.Url)
 		if videoId == "" {
 			return nil, fmt.Errorf("链接不合法")
 		}
 	}
+	// 检查Bilibili链接
 	if strings.Contains(req.Url, "bilibili.com") {
 		videoId := util.GetBilibiliVideoId(req.Url)
 		if videoId == "" {
 			return nil, fmt.Errorf("链接不合法")
 		}
 	}
-	// 生成任务id
+
+	// 2. 任务初始化
+	// 生成唯一任务ID
 	taskId := util.GenerateRandStringWithUpperLowerNum(8)
-	// 构造任务所需参数
+
+	// 3. 字幕类型确定
 	var resultType types.SubtitleResultType
-	// 根据入参选项确定要返回的字幕类型
+	// 根据用户配置确定字幕显示类型
 	if req.TargetLang == "none" {
 		resultType = types.SubtitleResultTypeOriginOnly
 	} else {
@@ -49,7 +57,8 @@ func (s Service) StartSubtitleTask(req dto.StartVideoSubtitleTaskReq) (*dto.Star
 			resultType = types.SubtitleResultTypeTargetOnly
 		}
 	}
-	// 文字替换map
+
+	// 4. 文字替换规则处理
 	replaceWordsMap := make(map[string]string)
 	if len(req.Replace) > 0 {
 		for _, replace := range req.Replace {
@@ -61,24 +70,26 @@ func (s Service) StartSubtitleTask(req dto.StartVideoSubtitleTaskReq) (*dto.Star
 			}
 		}
 	}
+
+	// 5. 任务目录创建
 	var err error
 	ctx := context.Background()
-	// 创建字幕任务文件夹
 	taskBasePath := filepath.Join("./tasks", taskId)
 	if _, err = os.Stat(taskBasePath); os.IsNotExist(err) {
-		// 不存在则创建
 		err = os.MkdirAll(filepath.Join(taskBasePath, "output"), os.ModePerm)
 		if err != nil {
 			log.GetLogger().Error("StartVideoSubtitleTask MkdirAll err", zap.Any("req", req), zap.Error(err))
 		}
 	}
 
-	// 创建任务
+	// 6. 任务状态初始化
 	storage.SubtitleTasks[taskId] = &types.SubtitleTask{
 		TaskId:   taskId,
 		VideoSrc: req.Url,
 		Status:   types.SubtitleTaskStatusProcessing,
 	}
+
+	// 7. TTS语音配置
 	var ttsVoiceCode string
 	if req.TtsVoiceCode == types.SubtitleTaskTtsVoiceCodeLongyu {
 		ttsVoiceCode = "longyu"
@@ -86,11 +97,11 @@ func (s Service) StartSubtitleTask(req dto.StartVideoSubtitleTaskReq) (*dto.Star
 		ttsVoiceCode = "longchen"
 	}
 
-	// 处理声音克隆源
+	// 8. 声音克隆处理
 	var voiceCloneAudioUrl string
 	if req.TtsVoiceCloneSrcFileUrl != "" {
 		localFileUrl := strings.TrimPrefix(req.TtsVoiceCloneSrcFileUrl, "local:")
-		fileKey := util.GenerateRandStringWithUpperLowerNum(5) + filepath.Ext(localFileUrl) // 防止url encode的问题，这里统一处理
+		fileKey := util.GenerateRandStringWithUpperLowerNum(5) + filepath.Ext(localFileUrl)
 		err = s.OssClient.UploadFile(context.Background(), fileKey, localFileUrl, s.OssClient.Bucket)
 		if err != nil {
 			log.GetLogger().Error("StartVideoSubtitleTask UploadFile err", zap.Any("req", req), zap.Error(err))
@@ -100,6 +111,7 @@ func (s Service) StartSubtitleTask(req dto.StartVideoSubtitleTaskReq) (*dto.Star
 		log.GetLogger().Info("StartVideoSubtitleTask 上传声音克隆源成功", zap.Any("oss url", voiceCloneAudioUrl))
 	}
 
+	// 9. 任务参数构建
 	stepParam := types.SubtitleTaskStepParam{
 		TaskId:                  taskId,
 		TaskBasePath:            taskBasePath,
@@ -116,12 +128,15 @@ func (s Service) StartSubtitleTask(req dto.StartVideoSubtitleTaskReq) (*dto.Star
 		EmbedSubtitleVideoType:  req.EmbedSubtitleVideoType,
 		VerticalVideoMajorTitle: req.VerticalMajorTitle,
 		VerticalVideoMinorTitle: req.VerticalMinorTitle,
-		MaxWordOneLine:          12, // 默认值
+		MaxWordOneLine:          12, // 默认每行最大字数
 	}
 	if req.OriginLanguageWordOneLine != 0 {
 		stepParam.MaxWordOneLine = req.OriginLanguageWordOneLine
 	}
+
+	// 10. 启动异步处理流程
 	go func() {
+		// 异常恢复处理
 		defer func() {
 			if r := recover(); r != nil {
 				const size = 64 << 10
@@ -131,8 +146,11 @@ func (s Service) StartSubtitleTask(req dto.StartVideoSubtitleTaskReq) (*dto.Star
 				storage.SubtitleTasks[taskId].Status = types.SubtitleTaskStatusFailed
 			}
 		}()
-		// 新版流程：链接->本地音频文件->视频信息获取（若有）->本地字幕文件->语言合成->视频合成->字幕文件链接生成
+
+		// 执行任务处理流程
 		log.GetLogger().Info("video subtitle start task", zap.String("taskId", taskId))
+
+		// 10.1 下载视频/音频文件
 		err = s.linkToFile(ctx, &stepParam)
 		if err != nil {
 			log.GetLogger().Error("StartVideoSubtitleTask linkToFile err", zap.Any("req", req), zap.Error(err))
@@ -140,14 +158,8 @@ func (s Service) StartSubtitleTask(req dto.StartVideoSubtitleTaskReq) (*dto.Star
 			storage.SubtitleTasks[stepParam.TaskId].FailReason = err.Error()
 			return
 		}
-		// 暂时不加视频信息
-		//err = s.getVideoInfo(ctx, &stepParam)
-		//if err != nil {
-		//	log.GetLogger().Error("StartVideoSubtitleTask getVideoInfo err", zap.Any("req", req), zap.Error(err))
-		//	storage.SubtitleTasks[stepParam.TaskId].Status = types.SubtitleTaskStatusFailed
-		//	storage.SubtitleTasks[stepParam.TaskId].FailReason = "get video info error"
-		//	return
-		//}
+
+		// 10.2 音频转字幕
 		err = s.audioToSubtitle(ctx, &stepParam)
 		if err != nil {
 			log.GetLogger().Error("StartVideoSubtitleTask audioToSubtitle err", zap.Any("req", req), zap.Error(err))
@@ -155,6 +167,8 @@ func (s Service) StartSubtitleTask(req dto.StartVideoSubtitleTaskReq) (*dto.Star
 			storage.SubtitleTasks[stepParam.TaskId].FailReason = err.Error()
 			return
 		}
+
+		// 10.3 字幕转语音
 		err = s.srtFileToSpeech(ctx, &stepParam)
 		if err != nil {
 			log.GetLogger().Error("StartVideoSubtitleTask srtFileToSpeech err", zap.Any("req", req), zap.Error(err))
@@ -162,6 +176,8 @@ func (s Service) StartSubtitleTask(req dto.StartVideoSubtitleTaskReq) (*dto.Star
 			storage.SubtitleTasks[stepParam.TaskId].FailReason = err.Error()
 			return
 		}
+
+		// 10.4 嵌入字幕到视频
 		err = s.embedSubtitles(ctx, &stepParam)
 		if err != nil {
 			log.GetLogger().Error("StartVideoSubtitleTask embedSubtitles err", zap.Any("req", req), zap.Error(err))
@@ -169,6 +185,8 @@ func (s Service) StartSubtitleTask(req dto.StartVideoSubtitleTaskReq) (*dto.Star
 			storage.SubtitleTasks[stepParam.TaskId].FailReason = err.Error()
 			return
 		}
+
+		// 10.5 上传处理结果
 		err = s.uploadSubtitles(ctx, &stepParam)
 		if err != nil {
 			log.GetLogger().Error("StartVideoSubtitleTask uploadSubtitles err", zap.Any("req", req), zap.Error(err))
@@ -180,19 +198,25 @@ func (s Service) StartSubtitleTask(req dto.StartVideoSubtitleTaskReq) (*dto.Star
 		log.GetLogger().Info("video subtitle task end", zap.String("taskId", taskId))
 	}()
 
+	// 11. 返回任务ID
 	return &dto.StartVideoSubtitleTaskResData{
 		TaskId: taskId,
 	}, nil
 }
 
+// GetTaskStatus 获取字幕任务状态的服务方法
+// 该方法负责查询任务进度、状态和结果信息
 func (s Service) GetTaskStatus(req dto.GetVideoSubtitleTaskReq) (*dto.GetVideoSubtitleTaskResData, error) {
+	// 1. 获取任务信息
 	task := storage.SubtitleTasks[req.TaskId]
 	if task == nil {
 		return nil, errors.New("任务不存在")
 	}
+	// 2. 检查任务状态
 	if task.Status == types.SubtitleTaskStatusFailed {
 		return nil, fmt.Errorf("任务失败，原因：%s", task.FailReason)
 	}
+	// 3. 构建返回数据
 	return &dto.GetVideoSubtitleTaskResData{
 		TaskId:         task.TaskId,
 		ProcessPercent: task.ProcessPct,
