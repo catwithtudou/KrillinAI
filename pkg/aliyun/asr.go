@@ -3,9 +3,6 @@ package aliyun
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
-	"go.uber.org/zap"
 	"io"
 	"krillin-ai/internal/storage"
 	"krillin-ai/internal/types"
@@ -16,12 +13,19 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
 )
 
+// AsrClient 阿里云语音识别客户端结构体
+// BailianApiKey 为阿里云百炼API的访问密钥
 type AsrClient struct {
 	BailianApiKey string
 }
 
+// NewAsrClient 创建新的语音识别客户端实例
 func NewAsrClient(bailianApiKey string) *AsrClient {
 	return &AsrClient{
 		BailianApiKey: bailianApiKey,
@@ -29,20 +33,27 @@ func NewAsrClient(bailianApiKey string) *AsrClient {
 }
 
 const (
-	wsURL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/" // WebSocket服务器地址
+	// wsURL WebSocket服务器地址，用于与阿里云ASR服务建立连接
+	wsURL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 )
 
+// dialer WebSocket连接器，使用默认配置
 var dialer = websocket.DefaultDialer
 
+// Transcription 执行语音转写任务
+// audioFile: 音频文件路径
+// language: 识别的目标语言
+// workDir: 工作目录
+// 返回转写结果数据和可能的错误
 func (c AsrClient) Transcription(audioFile, language, workDir string) (*types.TranscriptionData, error) {
-	// 处理音频
+	// 预处理音频文件：转换为单声道、16kHz采样率的格式
 	processedAudioFile, err := processAudio(audioFile)
 	if err != nil {
 		log.GetLogger().Error("处理音频失败", zap.Error(err), zap.String("audio file", audioFile))
 		return nil, err
 	}
 
-	// 连接WebSocket服务
+	// 建立WebSocket连接
 	conn, err := connectWebSocket(c.BailianApiKey)
 	if err != nil {
 		log.GetLogger().Error("连接WebSocket失败", zap.Error(err), zap.String("audio file", audioFile))
@@ -50,12 +61,14 @@ func (c AsrClient) Transcription(audioFile, language, workDir string) (*types.Tr
 	}
 	defer closeConnection(conn)
 
-	// 启动一个goroutine来接收结果
+	// 创建用于任务状态同步的通道
 	taskStarted := make(chan bool)
 	taskDone := make(chan bool)
 
+	// 初始化结果存储
 	words := make([]types.Word, 0)
 	text := ""
+	// 启动异步结果接收器
 	startResultReceiver(conn, &words, &text, taskStarted, taskDone)
 
 	// 发送run-task指令
@@ -93,30 +106,31 @@ func (c AsrClient) Transcription(audioFile, language, workDir string) (*types.Tr
 	return transcriptionData, nil
 }
 
-// 定义结构体来表示JSON数据
+// AsrHeader WebSocket通信的消息头部结构
 type AsrHeader struct {
-	Action       string                 `json:"action"`
-	TaskID       string                 `json:"task_id"`
-	Streaming    string                 `json:"streaming"`
-	Event        string                 `json:"event"`
-	ErrorCode    string                 `json:"error_code,omitempty"`
-	ErrorMessage string                 `json:"error_message,omitempty"`
-	Attributes   map[string]interface{} `json:"attributes"`
+	Action       string                 `json:"action"`                  // 操作类型
+	TaskID       string                 `json:"task_id"`                 // 任务ID
+	Streaming    string                 `json:"streaming"`               // 流式处理标识
+	Event        string                 `json:"event"`                   // 事件类型
+	ErrorCode    string                 `json:"error_code,omitempty"`    // 错误代码
+	ErrorMessage string                 `json:"error_message,omitempty"` // 错误信息
+	Attributes   map[string]interface{} `json:"attributes"`              // 附加属性
 }
 
+// Output 识别结果输出结构
 type Output struct {
 	Sentence struct {
-		BeginTime int64  `json:"begin_time"`
-		EndTime   *int64 `json:"end_time"`
-		Text      string `json:"text"`
+		BeginTime int64  `json:"begin_time"` // 句子开始时间
+		EndTime   *int64 `json:"end_time"`   // 句子结束时间
+		Text      string `json:"text"`       // 识别文本
 		Words     []struct {
-			BeginTime   int64  `json:"begin_time"`
-			EndTime     *int64 `json:"end_time"`
-			Text        string `json:"text"`
-			Punctuation string `json:"punctuation"`
+			BeginTime   int64  `json:"begin_time"`  // 单词开始时间
+			EndTime     *int64 `json:"end_time"`    // 单词结束时间
+			Text        string `json:"text"`        // 单词文本
+			Punctuation string `json:"punctuation"` // 标点符号
 		} `json:"words"`
 	} `json:"sentence"`
-	Usage interface{} `json:"usage"`
+	Usage interface{} `json:"usage"` // 用量统计
 }
 
 type Payload struct {
@@ -151,7 +165,8 @@ type Event struct {
 	Payload Payload   `json:"payload"`
 }
 
-// 把音频处理成单声道、16k采样率
+// processAudio 处理音频文件
+// 将输入音频转换为ASR服务要求的格式：单声道、16kHz采样率
 func processAudio(filePath string) (string, error) {
 	dest := strings.ReplaceAll(filePath, filepath.Ext(filePath), "_mono_16K.mp3")
 	cmdArgs := []string{"-i", filePath, "-ac", "1", "-ar", "16000", "-b:a", "192k", dest}
@@ -164,7 +179,8 @@ func processAudio(filePath string) (string, error) {
 	return dest, nil
 }
 
-// 连接WebSocket服务
+// connectWebSocket 建立WebSocket连接
+// 使用API密钥进行认证，并设置必要的请求头
 func connectWebSocket(apiKey string) (*websocket.Conn, error) {
 	header := make(http.Header)
 	header.Add("X-DashScope-DataInspection", "enable")
@@ -173,7 +189,8 @@ func connectWebSocket(apiKey string) (*websocket.Conn, error) {
 	return conn, err
 }
 
-// 启动一个goroutine异步接收WebSocket消息
+// startResultReceiver 启动异步结果接收处理
+// 持续监听WebSocket连接，处理服务器返回的识别结果
 func startResultReceiver(conn *websocket.Conn, words *[]types.Word, text *string, taskStarted chan<- bool, taskDone chan<- bool) {
 	go func() {
 		for {
@@ -212,7 +229,8 @@ func startResultReceiver(conn *websocket.Conn, words *[]types.Word, text *string
 	}()
 }
 
-// 发送run-task指令
+// sendRunTaskCmd 发送任务启动命令
+// 生成并发送任务初始化指令
 func sendRunTaskCmd(conn *websocket.Conn, language string) (string, error) {
 	runTaskCmd, taskID, err := generateRunTaskCmd(language)
 	if err != nil {
@@ -310,7 +328,8 @@ func generateFinishTaskCmd(taskID string) (string, error) {
 	return string(finishTaskCmdJSON), err
 }
 
-// 处理事件
+// handleEvent 处理WebSocket事件
+// 根据不同的事件类型执行相应的处理逻辑
 func handleEvent(conn *websocket.Conn, event *Event, taskStarted chan<- bool, taskDone chan<- bool) bool {
 	switch event.Header.Event {
 	case "task-started":
@@ -333,12 +352,12 @@ func handleEvent(conn *websocket.Conn, event *Event, taskStarted chan<- bool, ta
 	return false
 }
 
-// 处理任务失败事件
+// handleTaskFailed 处理任务失败事件
 func handleTaskFailed(event *Event, conn *websocket.Conn) {
 	log.GetLogger().Error("任务失败：", zap.String("error", event.Header.ErrorMessage))
 }
 
-// 关闭连接
+// closeConnection 安全关闭WebSocket连接
 func closeConnection(conn *websocket.Conn) {
 	if conn != nil {
 		conn.Close()

@@ -13,10 +13,17 @@ import (
 	"unicode"
 )
 
-// 处理每一个字幕块
+// ProcessBlock 处理每一个字幕块，将字幕内容分离到目标语言和原始语言两个文件中
+// 参数：
+//   - block: 包含字幕块内容的字符串切片
+//   - targetLanguageFile: 目标语言字幕完整文件的文件指针
+//   - targetLanguageTextFile: 目标语言纯文本的文件指针（不含编号和时间戳）
+//   - originLanguageFile: 原始语言字幕完整文件的文件指针
+//   - originLanguageTextFile: 原始语言纯文本的文件指针（不含编号和时间戳）
+//   - isTargetOnTop: 指示目标语言字幕是否在原始语言字幕上方的布尔值
 func ProcessBlock(block []string, targetLanguageFile, targetLanguageTextFile, originLanguageFile, originLanguageTextFile *os.File, isTargetOnTop bool) {
 	var targetLines, originLines []string
-	// 匹配时间戳的正则表达式
+	// 匹配时间戳的正则表达式，如 00:01:23,456 --> 00:01:27,890
 	timePattern := regexp.MustCompile(`\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}`)
 	for _, line := range block {
 		if timePattern.MatchString(line) || IsNumber(line) {
@@ -27,38 +34,44 @@ func ProcessBlock(block []string, targetLanguageFile, targetLanguageTextFile, or
 		}
 		if len(targetLines) == 2 && len(originLines) == 2 { // 刚写完编号和时间戳，到了上方的文字行
 			if isTargetOnTop {
+				// 若目标语言在上方，则当前行属于目标语言
 				targetLines = append(targetLines, line)
-				targetLanguageTextFile.WriteString(line) // 文稿文件
+				targetLanguageTextFile.WriteString(line) // 同时写入目标语言纯文本文件
 			} else {
+				// 若原始语言在上方，则当前行属于原始语言
 				originLines = append(originLines, line)
-				originLanguageTextFile.WriteString(line)
+				originLanguageTextFile.WriteString(line) // 同时写入原始语言纯文本文件
 			}
 			continue
 		}
 		// 到了下方的文字行
 		if isTargetOnTop {
+			// 若目标语言在上方，则当前行属于原始语言
 			originLines = append(originLines, line)
-			originLanguageTextFile.WriteString(line)
+			originLanguageTextFile.WriteString(line) // 同时写入原始语言纯文本文件
 		} else {
+			// 若原始语言在上方，则当前行属于目标语言
 			targetLines = append(targetLines, line)
-			targetLanguageTextFile.WriteString(line)
+			targetLanguageTextFile.WriteString(line) // 同时写入目标语言纯文本文件
 		}
 	}
 
+	// 只有当目标语言字幕行至少包含一行文本时才写入完整文件
 	if len(targetLines) > 2 {
-		// 写入目标语言文件
+		// 写入目标语言完整字幕文件（包含编号和时间戳）
 		for _, line := range targetLines {
 			targetLanguageFile.WriteString(line + "\n")
 		}
-		targetLanguageFile.WriteString("\n")
+		targetLanguageFile.WriteString("\n") // 添加一个空行作为字幕块分隔符
 	}
 
+	// 只有当原始语言字幕行至少包含一行文本时才写入完整文件
 	if len(originLines) > 2 {
-		// 写入源语言文件
+		// 写入原始语言完整字幕文件（包含编号和时间戳）
 		for _, line := range originLines {
 			originLanguageFile.WriteString(line + "\n")
 		}
-		originLanguageFile.WriteString("\n")
+		originLanguageFile.WriteString("\n") // 添加一个空行作为字幕块分隔符
 	}
 }
 
@@ -104,54 +117,81 @@ func TrimString(s string) string {
 	return s
 }
 
+// ParseSrtNoTsToSrtBlock 解析不带时间戳的SRT字幕文件为字幕块数组
+// srtNoTsFile: 不带时间戳的SRT字幕文件路径
+// 返回值: 字幕块数组和可能的错误
+// 字幕文件格式预期为：
+// 1
+// 目标语言字幕
+// 原始语言字幕
+//
+// 2
+// 目标语言字幕
+// 原始语言字幕
+// ...
 func ParseSrtNoTsToSrtBlock(srtNoTsFile string) ([]*SrtBlock, error) {
+	// 打开字幕文件
 	file, err := os.Open(srtNoTsFile)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
+	// 初始化字幕块数组和当前处理的字幕块
 	var blocks []*SrtBlock
 	var currentBlock SrtBlock
 	scanner := bufio.NewScanner(file)
+	// start标志用于跳过文件开始的描述性内容
 	start := true
 
+	// 逐行扫描字幕文件
 	for scanner.Scan() {
 		line := TrimString(scanner.Text())
-		// 去掉最开始的描述
+		// 处理文件开头的描述性内容：
+		// 如果是开始状态且当前行不是数字，则跳过该行
 		if start && !IsNumber(line) {
 			continue
 		} else {
 			start = false
 		}
-		if line == "" { // 空行表示一个块的结束
+
+		// 空行处理：表示一个字幕块的结束
+		if line == "" {
+			// 如果当前块有效（Index不为0），则保存当前块并重置
 			if currentBlock.Index != 0 {
 				cur := currentBlock
 				blocks = append(blocks, &cur)
-				currentBlock = SrtBlock{} // 重置
+				currentBlock = SrtBlock{} // 重置当前块
 			}
 			continue
 		}
 
-		if currentBlock.Index == 0 { // 按文件内容依次赋值
+		// 按照字幕块格式依次解析各个字段
+		if currentBlock.Index == 0 {
+			// 解析字幕序号
 			var index int
 			_, err = fmt.Sscanf(line, "%d", &index)
 			if err != nil {
+				// 如果解析失败（可能是空语音等情况），直接返回已解析的内容
 				return blocks, nil
-			} // 可能是空语音等，直接忽略
+			}
 			currentBlock.Index = index
 		} else if currentBlock.TargetLanguageSentence == "" {
+			// 解析目标语言字幕
 			currentBlock.TargetLanguageSentence = line
 		} else if currentBlock.OriginLanguageSentence == "" {
+			// 解析原始语言字幕
 			currentBlock.OriginLanguageSentence = line
 		}
 	}
-	// 最后的块
+
+	// 处理文件最后一个字幕块
 	if currentBlock.Index != 0 {
 		cur := currentBlock
 		blocks = append(blocks, &cur)
 	}
 
+	// 检查扫描过程中是否有错误
 	if err = scanner.Err(); err != nil {
 		return nil, err
 	}
@@ -169,25 +209,41 @@ func SplitSentence(sentence string) []string {
 	return words
 }
 
+// MergeFile 将多个文件的内容合并到一个最终文件中
+// 参数：
+//   - finalFile: 合并后的目标文件路径
+//   - files: 需要合并的源文件路径列表，可变参数
+//
+// 返回：
+//   - error: 操作过程中可能发生的错误
 func MergeFile(finalFile string, files ...string) error {
-	// 创建最终文件
+	// 创建最终文件，如果文件已存在则覆盖
 	final, err := os.Create(finalFile)
 	if err != nil {
 		return err
 	}
+	defer final.Close() // 确保函数结束时关闭文件句柄
 
-	// 逐个读取文件并写入最终文件
+	// 逐个处理源文件
 	for _, file := range files {
+		// 打开源文件
 		f, err := os.Open(file)
 		if err != nil {
 			return err
 		}
 		defer f.Close()
 
+		// 使用Scanner按行读取文件内容
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			line := scanner.Text()
+			// 将每行内容写入目标文件，并添加换行符
 			final.WriteString(line + "\n")
+		}
+
+		// 检查Scanner是否发生错误
+		if err := scanner.Err(); err != nil {
+			return err
 		}
 	}
 
