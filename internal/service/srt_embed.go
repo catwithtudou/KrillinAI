@@ -228,6 +228,7 @@ func formatTimestamp(t time.Duration) string {
 //   - 英文字幕保持原样显示
 //   - 根据字幕内容计算时间比例，确保长字幕有足够的显示时间
 func srtToAss(inputSRT, outputASS string, isHorizontal bool, stepParam *types.SubtitleTaskStepParam) error {
+	// 打开SRT文件进行读取
 	file, err := os.Open(inputSRT)
 	if err != nil {
 		log.GetLogger().Error("srtToAss Open input srt error", zap.Error(err))
@@ -235,6 +236,7 @@ func srtToAss(inputSRT, outputASS string, isHorizontal bool, stepParam *types.Su
 	}
 	defer file.Close()
 
+	// 创建ASS文件准备写入
 	assFile, err := os.Create(outputASS)
 	if err != nil {
 		log.GetLogger().Error("srtToAss Create output ass error", zap.Error(err))
@@ -243,23 +245,29 @@ func srtToAss(inputSRT, outputASS string, isHorizontal bool, stepParam *types.Su
 	defer assFile.Close()
 	scanner := bufio.NewScanner(file)
 
+	// 横屏模式处理逻辑
 	if isHorizontal {
+		// 写入横屏ASS头部模板，包含样式定义、字体设置等
 		_, _ = assFile.WriteString(types.AssHeaderHorizontal)
+
+		// 逐行扫描SRT文件
 		for scanner.Scan() {
 			line := scanner.Text()
 			if line == "" {
-				continue
+				continue // 跳过空行
 			}
-			// 读取时间戳行
+
+			// 读取时间戳行（如：00:01:23,456 --> 00:01:25,789）
 			if !scanner.Scan() {
-				break
+				break // 文件结束
 			}
 			timestampLine := scanner.Text()
 			parts := strings.Split(timestampLine, " --> ")
 			if len(parts) != 2 {
-				continue // 无效时间戳格式
+				continue // 无效时间戳格式，跳过此字幕块
 			}
 
+			// 解析起始和结束时间
 			startTimeStr := strings.TrimSpace(parts[0])
 			endTimeStr := strings.TrimSpace(parts[1])
 			startTime, err := parseSrtTime(startTimeStr)
@@ -273,44 +281,63 @@ func srtToAss(inputSRT, outputASS string, isHorizontal bool, stepParam *types.Su
 				return fmt.Errorf("srtToAss parseSrtTime error: %w", err)
 			}
 
+			// 读取字幕文本内容（可能有多行）
 			var subtitleLines []string
 			for scanner.Scan() {
 				textLine := scanner.Text()
 				if textLine == "" {
-					break // 字幕块结束
+					break // 空行表示当前字幕块结束
 				}
 				subtitleLines = append(subtitleLines, textLine)
 			}
 
+			// 确保至少有两行文本（双语字幕需要）
 			if len(subtitleLines) < 2 {
-				continue
+				continue // 如果不足两行，跳过此字幕
 			}
+
+			// 根据字幕类型确定主要语言
 			var majorTextLanguage types.StandardLanguageName
-			if stepParam.SubtitleResultType == types.SubtitleResultTypeBilingualTranslationOnTop { // 一定是bilingual
+			if stepParam.SubtitleResultType == types.SubtitleResultTypeBilingualTranslationOnTop {
+				// 若翻译在上方模式，则目标语言为主要语言
 				majorTextLanguage = stepParam.TargetLanguage
 			} else {
+				// 否则原始语言为主要语言
 				majorTextLanguage = stepParam.OriginLanguage
 			}
 
+			// 处理主要文本行：根据语言特性分割文本，并用\N连接（ASS中的换行符）
+			// 同时在分段之间添加空格以美化显示
 			majorLine := strings.Join(splitMajorTextInHorizontal(subtitleLines[0], majorTextLanguage, stepParam.MaxWordOneLine), "      \\N")
+			// 处理次要文本行：清理标点符号
 			minorLine := util.CleanPunction(subtitleLines[1])
 
-			// ASS条目
+			// 格式化时间戳为ASS格式
 			startFormatted := formatTimestamp(startTime)
 			endFormatted := formatTimestamp(endTime)
+
+			// 构建ASS对话行
+			// \an2表示居中对齐，\rMajor和\rMinor引用预定义的样式
 			combinedText := fmt.Sprintf("{\\an2}{\\rMajor}%s\\N{\\rMinor}%s", majorLine, minorLine)
+			// 写入ASS文件，格式为：Dialogue: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 			_, _ = assFile.WriteString(fmt.Sprintf("Dialogue: 0,%s,%s,Major,,0,0,0,,%s\n", startFormatted, endFormatted, combinedText))
 		}
 	} else {
+		// 竖屏模式处理逻辑
 		// TODO 竖屏拆分调优
+		// 写入竖屏ASS头部模板
 		_, _ = assFile.WriteString(types.AssHeaderVertical)
+
+		// 逐行扫描SRT文件
 		for scanner.Scan() {
 			line := scanner.Text()
 			if line == "" {
-				continue
+				continue // 跳过空行
 			}
+
+			// 读取时间戳行
 			if !scanner.Scan() {
-				break
+				break // 文件结束
 			}
 			timestampLine := scanner.Text()
 			parts := strings.Split(timestampLine, " --> ")
@@ -318,35 +345,44 @@ func srtToAss(inputSRT, outputASS string, isHorizontal bool, stepParam *types.Su
 				continue // 无效时间戳格式
 			}
 
+			// 解析起始和结束时间
 			startTimeStr := strings.TrimSpace(parts[0])
 			endTimeStr := strings.TrimSpace(parts[1])
 			startTime, err := parseSrtTime(startTimeStr)
 			if err != nil {
-				return err
+				return err // 注意：这里漏掉了错误日志记录
 			}
 			endTime, err := parseSrtTime(endTimeStr)
 			if err != nil {
-				return err
+				return err // 注意：这里漏掉了错误日志记录
 			}
 
+			// 竖屏模式下只读取一行字幕内容
 			var content string
 			scanner.Scan()
 			content = scanner.Text()
 			if content == "" {
-				continue
+				continue // 跳过空内容
 			}
+
+			// 计算字幕总持续时间，用于后续分割
 			totalTime := endTime - startTime
 
+			// 根据内容是否包含字母区分处理中文和英文字幕
 			if !util.ContainsAlphabetic(content) {
-				// 处理中文字幕
-				chineseLines := splitChineseText(content, 10)
+				// 处理中文字幕：需要按字符数分割成多行
+				chineseLines := splitChineseText(content, 10) // 每行最多10个字符
+
+				// 为每一行分配时间段，确保长度合适
 				for i, line := range chineseLines {
+					// 计算当前行的开始和结束时间，根据行数平均分配总时间
 					iStart := startTime + time.Duration(float64(i)*float64(totalTime)/float64(len(chineseLines)))
 					iEnd := startTime + time.Duration(float64(i+1)*float64(totalTime)/float64(len(chineseLines)))
 					if iEnd > endTime {
-						iEnd = endTime
+						iEnd = endTime // 确保不超过原字幕的结束时间
 					}
 
+					// 格式化时间并写入ASS对话行
 					startFormatted := formatTimestamp(iStart)
 					endFormatted := formatTimestamp(iEnd)
 					cleanedText := util.CleanPunction(line)
@@ -354,10 +390,11 @@ func srtToAss(inputSRT, outputASS string, isHorizontal bool, stepParam *types.Su
 					_, _ = assFile.WriteString(fmt.Sprintf("Dialogue: 0,%s,%s,Major,,0,0,0,,%s\n", startFormatted, endFormatted, combinedText))
 				}
 			} else {
-				// 处理英文字幕
+				// 处理英文字幕：直接使用原始时间段
 				startFormatted := formatTimestamp(startTime)
 				endFormatted := formatTimestamp(endTime)
 				cleanedText := util.CleanPunction(content)
+				// 对于英文字幕使用Minor样式
 				combinedText := fmt.Sprintf("{\\an2}{\\rMinor}%s", cleanedText)
 				_, _ = assFile.WriteString(fmt.Sprintf("Dialogue: 0,%s,%s,Minor,,0,0,0,,%s\n", startFormatted, endFormatted, combinedText))
 			}
