@@ -225,38 +225,73 @@ func adjustAudioDuration(inputFile, outputFile, taskBasePath string, subtitleDur
 
 	// 情况1: 音频时长小于字幕时长，需要补充静音
 	if audioDuration < subtitleDuration {
+		// 计算需要补充的静音时长
+		// subtitleDuration: 字幕要求的时长
+		// audioDuration: 实际生成的语音时长
+		// silenceDuration: 需要补充的静音时长
 		silenceDuration := subtitleDuration - audioDuration
+
+		// 生成静音文件的完整路径
 		silenceFile := filepath.Join(taskBasePath, "silence.wav")
+
+		// 调用newGenerateSilence生成指定时长的静音WAV文件
+		// 使用FFmpeg的anullsrc滤镜生成静音音频
 		err := newGenerateSilence(silenceFile, silenceDuration)
 		if err != nil {
 			return fmt.Errorf("error generating silence: %v", err)
 		}
 
+		// 获取生成的静音文件的实际时长，用于日志记录和验证
 		silenceAudioDuration, _ := util.GetAudioDuration(silenceFile)
 		log.GetLogger().Info("adjustAudioDuration", zap.Any("silenceDuration", silenceAudioDuration))
 
-		// 拼接音频和静音
+		// 创建FFmpeg拼接配置文件
+		// 这个文件用于告诉FFmpeg如何拼接音频文件
 		concatFile := filepath.Join(taskBasePath, "concat.txt")
 		f, err := os.Create(concatFile)
 		if err != nil {
 			return fmt.Errorf("adjustAudioDuration create concat file error: %w", err)
 		}
+		// 确保临时文件在使用后被删除
 		defer os.Remove(concatFile)
 
-		_, err = f.WriteString(fmt.Sprintf("file '%s'\nfile '%s'\n", filepath.Base(inputFile), filepath.Base(silenceFile)))
+		// 写入FFmpeg拼接配置
+		// 格式要求：
+		// 1. 每行必须以'file'开头
+		// 2. 文件路径需要用单引号包裹
+		// 3. 每个文件占一行
+		// 4. 文件按顺序拼接，先播放第一个文件，再播放第二个文件
+		_, err = f.WriteString(fmt.Sprintf("file '%s'\nfile '%s'\n",
+			filepath.Base(inputFile),    // 原始语音文件
+			filepath.Base(silenceFile))) // 静音文件
 		if err != nil {
 			return fmt.Errorf("adjustAudioDuration write to concat file error: %v", err)
 		}
+		// 关闭文件，确保内容被写入
 		f.Close()
 
+		// 执行FFmpeg拼接命令
+		// 参数说明：
+		// -y: 覆盖已存在的输出文件
+		// -f concat: 使用concat格式进行拼接
+		// -safe 0: 允许使用绝对路径
+		// -i concatFile: 指定拼接配置文件
+		// -c copy: 直接复制音频流，不重新编码，保持原始质量
 		cmd := exec.Command(storage.FfmpegPath, "-y", "-f", "concat", "-safe", "0", "-i", concatFile, "-c", "copy", outputFile)
+
+		// 记录FFmpeg命令执行信息，用于调试
 		log.GetLogger().Info("adjustAudioDuration", zap.Any("inputFile", inputFile), zap.Any("outputFile", outputFile), zap.String("run command", cmd.String()))
+
+		// 将FFmpeg的错误输出重定向到标准错误
 		cmd.Stderr = os.Stderr
+
+		// 执行FFmpeg命令
 		err = cmd.Run()
 		if err != nil {
-			return fmt.Errorf("adjustAudioDuration concat audio and silence  error: %v", err)
+			return fmt.Errorf("adjustAudioDuration concat audio and silence error: %v", err)
 		}
 
+		// 获取拼接后文件的时长，用于验证
 		concatFileDuration, _ := util.GetAudioDuration(outputFile)
 		log.GetLogger().Info("adjustAudioDuration", zap.Any("concatFileDuration", concatFileDuration))
 		return nil
