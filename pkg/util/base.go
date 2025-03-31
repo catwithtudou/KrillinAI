@@ -125,22 +125,51 @@ func IsNumber(s string) bool {
 	return err == nil
 }
 
+// Unzip 解压缩ZIP文件到指定目录
+//
+// 功能说明：
+// 1. 打开并读取ZIP文件
+// 2. 创建目标目录
+// 3. 遍历ZIP文件中的所有文件
+// 4. 保持原始文件权限
+// 5. 支持目录结构解压
+//
+// 参数：
+//   - zipFile: ZIP文件的完整路径
+//   - destDir: 解压目标目录的完整路径
+//
+// 返回：
+//   - error: 解压过程中的错误信息，如果成功则返回nil
+//
+// 错误处理：
+//   - 打开ZIP文件失败
+//   - 创建目标目录失败
+//   - 创建解压文件失败
+//   - 读取ZIP内容失败
+//   - 复制文件内容失败
 func Unzip(zipFile, destDir string) error {
+	// 打开ZIP文件
 	zipReader, err := zip.OpenReader(zipFile)
 	if err != nil {
 		return fmt.Errorf("打开zip文件失败: %v", err)
 	}
+	// 确保ZIP文件句柄被正确关闭
 	defer zipReader.Close()
 
+	// 创建目标目录，如果目录已存在则保持不变
 	err = os.MkdirAll(destDir, 0755)
 	if err != nil {
 		return fmt.Errorf("创建目标目录失败: %v", err)
 	}
 
+	// 遍历ZIP文件中的所有文件
 	for _, file := range zipReader.File {
+		// 构建目标文件的完整路径
 		filePath := filepath.Join(destDir, file.Name)
 
+		// 处理目录
 		if file.FileInfo().IsDir() {
+			// 创建目录，保持原始权限
 			err := os.MkdirAll(filePath, file.Mode())
 			if err != nil {
 				return fmt.Errorf("创建目录失败: %v", err)
@@ -148,18 +177,23 @@ func Unzip(zipFile, destDir string) error {
 			continue
 		}
 
+		// 创建目标文件
 		destFile, err := os.Create(filePath)
 		if err != nil {
 			return fmt.Errorf("创建文件失败: %v", err)
 		}
+		// 确保文件句柄被正确关闭
 		defer destFile.Close()
 
+		// 打开ZIP文件中的文件内容
 		zipFileReader, err := file.Open()
 		if err != nil {
 			return fmt.Errorf("打开zip文件内容失败: %v", err)
 		}
+		// 确保ZIP文件内容读取器被正确关闭
 		defer zipFileReader.Close()
 
+		// 复制文件内容到目标文件
 		_, err = io.Copy(destFile, zipFileReader)
 		if err != nil {
 			return fmt.Errorf("复制文件内容失败: %v", err)
